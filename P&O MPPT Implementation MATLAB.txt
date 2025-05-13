@@ -1,0 +1,195 @@
+% P&O MPPT Implementation
+clear all;
+% Initialize environment
+env = MPPTEnv();
+obs = reset(env);
+
+% Validate initial obs
+if ~isvector(obs) || length(obs) ~= 3 || any(isnan(obs)) || ~all(isnumeric(obs))
+    error('Invalid initial obs after reset: obs = %s', mat2str(obs));
+end
+disp(['Initial obs: Irradiance = ' num2str(obs(1)) ...
+      ', Voltage = ' num2str(obs(2)) ', Current = ' num2str(obs(3))]);
+
+done = false;
+
+% Initial variables
+prev_power = 0;
+deltaV = 0.5; % Reverted to previous value
+V_ref = 10;
+min_voltage = 5;
+max_voltage = 21;
+direction = 1;
+
+% Fallback action space
+fallback_action_space = [-0.5, 0, 0.5];
+
+% Logging
+powers = [];
+voltages = [];
+irradiances = [];
+steps = [];
+V_ref_log = [];
+actions_log = [];
+
+% Helper function: Map V_ref to action
+function action = voltage_to_action(V_ref, env, current_voltage)
+    if ~isnumeric(current_voltage) || isnan(current_voltage) || ~isreal(current_voltage)
+        action = 2; % Default to no change
+        return;
+    end
+    delta = V_ref - current_voltage;
+    if ~isnumeric(delta) || isnan(delta) || ~isreal(delta)
+        action = 2; % Default to no change
+    elseif abs(delta) < 0.1
+        action = 2; % Index of 0
+    elseif delta > 0
+        action = 3; % Index of 0.5
+    else
+        action = 1; % Index of -0.5
+    end
+end
+
+% Main loop
+for step = 1:20000
+    % Set irradiance
+    if step <= 100
+        G = 1000 * (step / 100);
+    elseif step <= 8000
+        G = 1000;
+    elseif step <= 13000
+        G = 600;
+    elseif step <= 18000
+        G = 600 + ((step - 13000) / 5000) * 400;
+    else
+        G = 1000;
+    end
+    env.setIrradiance(G);
+
+    % Validate current_voltage
+    if ~isvector(obs) || length(obs) < 2 || isnan(obs(2)) || ~isnumeric(obs(2))
+        error('Invalid obs(2) before action at step %d: obs = %s', step, mat2str(obs));
+    end
+    current_voltage = obs(2);
+
+    % Calculate action
+    action = voltage_to_action(V_ref, env, current_voltage);
+
+    % Validate action and get action value
+    if ~isscalar(action) || ~isnumeric(action) || ~isreal(action) || ~ismember(action, [1, 2, 3])
+        error('Invalid action %s at step %d', mat2str(action), step);
+    end
+    action_space = env.getActionSpace();
+    if ~isvector(action_space) || length(action_space) ~= 3
+        warning('Invalid action space at step %d: action_space = %s. Using fallback.', ...
+                step, mat2str(action_space));
+        action_space = fallback_action_space;
+    end
+    action_value = action_space(action);
+
+    % Debug action
+    if step <= 20
+        disp(['Step ' num2str(step) ': Action = ' num2str(action) ...
+              ', Action Value = ' num2str(action_value) ...
+              ', Action Space = ' mat2str(action_space)]);
+    end
+
+    % Step environment
+    [obs, reward, done, info] = env.step(action);
+
+    % Validate obs
+    if ~isvector(obs) || length(obs) ~= 3 || any(isnan(obs)) || ~all(isnumeric(obs))
+        error('Invalid obs at step %d: obs = %s', step, mat2str(obs));
+    end
+
+    % Debugging print
+    if step <= 10
+        disp(['Step ' num2str(step) ': Irradiance = ' num2str(obs(1)) ...
+              ', Voltage = ' num2str(obs(2)) ', Current = ' num2str(obs(3)) ...
+              ', Power = ' num2str(obs(2)*obs(3))]);
+    end
+
+    % Debug obs and MPP
+    if step <= 20 || mod(step, 1000) == 0
+        [voltages_pv, powers_pv] = env.getPVcurve(G);
+        [max_power, idx] = max(powers_pv);
+        mpp_voltage = voltages_pv(idx);
+        fprintf('Step %d: V_ref = %.2f, Voltage = %.2f, Current = %.4f, Power = %.2f, MPP = %.2f W at %.2f V\n', ...
+                step, V_ref, obs(2), obs(3), obs(2)*obs(3), max_power, mpp_voltage);
+    end
+
+    % Extract state
+    irradiance = obs(1);
+    voltage = obs(2);
+    current = obs(3);
+    power = voltage * current;
+
+    % Log data
+    powers(end+1) = power;
+    voltages(end+1) = voltage;
+    irradiances(end+1) = G;
+    steps(end+1) = step;
+    V_ref_log(end+1) = V_ref;
+    actions_log(end+1) = action_value;
+
+    % P&O Logic (Always perturb)
+    power_diff = power - prev_power;
+    if power > prev_power
+        V_ref = V_ref + deltaV * direction;
+    else
+        direction = -direction;
+        V_ref = V_ref + deltaV * direction;
+    end
+
+    % Bound V_ref
+    V_ref = max(min_voltage, min(max_voltage, V_ref));
+
+    prev_power = power;
+
+    if done
+        break;
+    end
+end
+
+% Plot Results
+figure;
+subplot(5,1,1);
+plot(steps, powers, 'b');
+ylabel('Power (W)');
+title('P&O Power Output');
+
+subplot(5,1,2);
+plot(steps, voltages, 'b', steps, V_ref_log, 'r--');
+ylabel('Voltage (V)');
+legend('Actual Voltage', 'V_ref');
+
+subplot(5,1,3);
+plot(steps, irradiances, 'g');
+ylabel('Irradiance (W/m^2)');
+
+subplot(5,1,4);
+plot(steps, powers ./ max(irradiances, 1), 'm');
+ylabel('Efficiency (P/G)');
+xlabel('Steps');
+
+subplot(5,1,5);
+plot(steps, actions_log, 'k');
+ylabel('Action (V)');
+xlabel('Steps');
+
+% Display action space
+disp('Action Space:');
+disp(env.getActionSpace());
+
+% Generate P-V curve for validation
+[voltages_pv, powers_pv] = env.getPVcurve(1000);
+figure;
+plot(voltages_pv, powers_pv, 'b');
+xlabel('Voltage (V)');
+ylabel('Power (W)');
+title('P-V Curve at 1000 W/m^2');
+hold on;
+[max_power, idx] = max(powers_pv);
+plot(voltages_pv(idx), max_power, 'ro', 'MarkerFaceColor', 'r');
+text(voltages_pv(idx), max_power, sprintf('MPP: %.2f W at %.2f V', max_power, voltages_pv(idx)));
+hold off;

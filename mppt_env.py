@@ -51,41 +51,35 @@ class MPPTEnv(gym.Env):
         )
         
     def plot_irradiance(self):
-        # Plot irradiance over time (using the irradiance_log)
         plt.figure(figsize=(8, 6))
-        plt.plot(self.irradiance_log)
-        plt.xlabel("Time Step")
+        plt.plot(range(len(self.irradiance_log)), self.irradiance_log)
+        plt.xlabel("Time (s)")
         plt.ylabel("Irradiance (W/m²)")
         plt.title("Irradiance vs Time")
         plt.grid(True)
         plt.show()
 
     def plot_power_vs_time(self):
-        # Plot Power Output vs Time
         plt.figure(figsize=(8, 6))
-        plt.plot(self.power_log)
-        plt.xlabel("Time Step")
+        plt.plot(range(len(self.power_log)), self.power_log)
+        plt.xlabel("Time (s)")
         plt.ylabel("Power Output (W)")
         plt.title("Raw Power Output vs Time")
         plt.grid()
         plt.show()
 
     def plot_voltage_vs_time(self):
-        # Plot Voltage vs Time 
-            # Verify power_log before plotting
-        print(f"Plotting Power: Total points = {len(self.power_log)}")
-        print(f"Sample power values: {self.power_log[-5:]}")  # Last 5 values for inspection
+        print(f"Plotting Voltage: Total points = {len(self.voltage_log)}")
+        print(f"Sample voltage values: {self.voltage_log[-5:]}")
         plt.figure(figsize=(8, 6))
-        plt.plot(self.voltage_log)
-        plt.xlabel("Time Step")
+        plt.plot(range(len(self.voltage_log)), self.voltage_log)
+        plt.xlabel("Time (s)")
         plt.ylabel("Voltage (V)")
         plt.title("Raw Voltage vs Time")
-        plt.legend()
         plt.grid()
         plt.show()
 
     def plot_power_vs_voltage(self):
-        # Plot Power Output vs Voltage (Raw Data)
         plt.figure(figsize=(8, 6))
         plt.scatter(self.voltage_log, self.power_log, s=1, alpha=0.5)
         plt.xlabel("Voltage (V)")
@@ -95,25 +89,23 @@ class MPPTEnv(gym.Env):
         plt.show()
 
     def plot_temperature_vs_time(self):
-        # Plot Temperature Change vs Time (Raw Data)
         plt.figure(figsize=(8, 6))
-        plt.plot(self.temperature_log)
-        plt.xlabel("Time Step")
+        plt.plot(range(len(self.temperature_log)), self.temperature_log)
+        plt.xlabel("Time (s)")
         plt.ylabel("Temperature (°C)")
         plt.title("Temperature Change vs Time")
         plt.grid()
         plt.show()
 
     def plot_reward_vs_time(self):
-        #Plot Reward vs Time (Smoothed Data)
         plt.figure(figsize=(8, 6))
-        plt.plot(self.reward_log)
-        plt.xlabel("Time Step")
+        plt.plot(range(len(self.reward_log)), self.reward_log)
+        plt.xlabel("Time (s)")
         plt.ylabel("Reward")
-        plt.title("Reward vs Time Step")
-        plt.legend()
+        plt.title("Reward vs Time")
         plt.grid()
         plt.show()
+
 
     def get_open_circuit_voltage(self, irradiance):
         Voc_stc = 21.0
@@ -122,17 +114,23 @@ class MPPTEnv(gym.Env):
         temperature_factor = 1 + beta * (self.temperature - 25)
         irradiance_factor = 1 + alpha * (self.irradiance / 1000)
         return Voc_stc * temperature_factor * irradiance_factor
+    
+    def get_short_circuit_current(self, irradiance):
+        Isc_stc = 8.0  # Short-circuit current at standard test conditions
+        isc_coefficient = 0.1  # Coefficient for short-circuit current change with irradiance
+        return Isc_stc * (1 + isc_coefficient * (irradiance / 1000))
 
     def get_reward(self, voltage, power, action):
         oc_voltage = self.get_open_circuit_voltage(self.irradiance)
         mppt_voltage = 0.8 * oc_voltage
-        voltage_factor = 1 - (abs(voltage - mppt_voltage) / mppt_voltage)
+        voltage_factor = max(0, 1 - (abs(voltage - mppt_voltage) / mppt_voltage))
+
+        # Dynamically calculate max_power based on current irradiance and Isc
+        isc = self.get_short_circuit_current(self.irradiance)
+        max_power = isc * self.get_open_circuit_voltage(self.irradiance) * self.module_area * self.efficiency
     
-        # Dynamically calculate max_power based on current irradiance
-        max_power = self.irradiance * self.module_area * self.efficiency * self.num_modules
-    
-        power_factor = power / max_power
-        reward = power_factor * voltage_factor
+        power_factor = power / (max_power + 1e-6)
+        reward = abs(voltage - mppt_voltage)
 
         if action == 1:
             reward -= 0.2
@@ -210,7 +208,7 @@ class MPPTEnv(gym.Env):
         self.voltage_log.append(voltage)  # Log the voltage value
         self.power_log.append(power)  # Log the power value
         self.temperature_log.append(self.temperature)  # Log temperature
-        self.reward_log.append(reward)  # Log reward
+        
 
         # Power calculation
         power_per_module = self.irradiance * self.module_area * self.efficiency
@@ -304,6 +302,19 @@ try:
 except:
     print("No pre-trained model found, starting from scratch.")
     model = PPO("MlpPolicy", env, learning_rate=0.0001, n_steps=2048, verbose=1)
+
+# Modify policy_kwargs for wider exploration
+policy_kwargs = dict(log_std_init=-0.5)  # Option 2: higher exploration at start
+
+# Create PPO model with modified ent_coef and policy_kwargs for better exploration
+model = PPO(
+    "MlpPolicy",
+    env,
+    ent_coef=0.02,                # Option 1: encourages more exploration
+    policy_kwargs=policy_kwargs, # Apply custom policy with wider initial std
+    verbose=1,
+    tensorboard_log="./ppo_log"
+)
 
 # Train the model
 model.learn(total_timesteps=20000)

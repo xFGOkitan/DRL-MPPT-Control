@@ -1,0 +1,129 @@
+% Updated MPPTEnv Class
+classdef MPPTEnv < rl.env.MATLABEnvironment
+    properties
+        StepCount = 0
+        MaxSteps = 20000
+        VoltageLevels = linspace(5, 40, 50) % For reference, not used directly
+        Irradiance = 0
+    end
+
+    properties(Access = protected)
+        CurrentVoltage = 20
+        CurrentCurrent = 0
+    end
+
+    properties(Access = private)
+        PanelArea = 1.6
+        Efficiency = 0.18
+        Isc = 100.0 % Adjusted to achieve 288 W
+        Voc = 21.0
+    end
+
+    methods
+        function setIrradiance(this, G)
+            this.Irradiance = max(0, G);
+        end
+
+        function this = MPPTEnv()
+            % Define observation and action space
+            ObservationInfo = rlNumericSpec([3 1], ...
+                'LowerLimit', [0; 0; 0], ...
+                'UpperLimit', [1000; 50; 50]);
+            ObservationInfo.Name = 'observations';
+
+            voltageStep = 0.5; % Match deltaV
+            ActionInfo = rlFiniteSetSpec([-voltageStep, 0, voltageStep]);
+            ActionInfo.Name = 'voltage delta';
+
+            this = this@rl.env.MATLABEnvironment(ObservationInfo, ActionInfo);
+
+            % Initialize current
+            this.CurrentCurrent = this.calculateCurrent(this.CurrentVoltage, this.Irradiance);
+        end
+
+        function obs = reset(this)
+            this.StepCount = 0;
+            this.Irradiance = 0;
+            this.CurrentVoltage = 10;
+            this.CurrentCurrent = this.calculateCurrent(this.CurrentVoltage, this.Irradiance);
+            obs = [this.Irradiance; this.CurrentVoltage; this.CurrentCurrent];
+            if ~isvector(obs) || length(obs) ~= 3 || any(isnan(obs)) || ~all(isnumeric(obs))
+                error('Invalid obs in reset: obs = %s', mat2str(obs));
+            end
+        end
+
+        function [obs, reward, isDone, info] = step(this, action)
+            this.StepCount = this.StepCount + 1;
+
+            % Validate action
+            if ~ismember(action, 1:length(this.ActionInfo.Elements))
+                error('Invalid action %d at step %d', action, this.StepCount);
+            end
+
+            % Apply voltage adjustment
+            voltageDelta = this.ActionInfo.Elements(action);
+            this.CurrentVoltage = this.CurrentVoltage + voltageDelta;
+            this.CurrentVoltage = max(5, min(this.CurrentVoltage, 21));
+
+            % Update current and power
+            this.CurrentCurrent = this.calculateCurrent(this.CurrentVoltage, this.Irradiance);
+            power = this.CurrentVoltage * this.CurrentCurrent;
+
+            % Protect action space integrity
+            if ~isvector(this.ActionInfo.Elements) || length(this.ActionInfo.Elements) ~= 3
+                this.ActionInfo = rlFiniteSetSpec([-0.5, 0, 0.5]);
+                warning('Reinitialized ActionInfo at step %d due to corruption.', this.StepCount);
+            end
+
+            % Output
+            obs = [this.Irradiance; this.CurrentVoltage; this.CurrentCurrent];
+            reward = power;
+            isDone = this.StepCount >= this.MaxSteps;
+            info = struct();
+            if ~isvector(obs) || length(obs) ~= 3 || any(isnan(obs)) || ~all(isnumeric(obs))
+                error('Invalid obs in step %d: obs = %s', this.StepCount, mat2str(obs));
+            end
+        end
+
+        function I = calculateCurrent(this, V, G)
+            % Adjusted PV model to achieve 288 W at ~18 V
+            raw_current = (G / 1000) * this.Isc * max(0, 1 - (V / this.Voc)^3); % Even softer drop-off
+            I = raw_current * this.PanelArea * this.Efficiency;
+            if V >= 0.95 * this.Voc
+                I = I * 0.1; % Adjusted near-Voc drop
+            end
+            I = max(0, I);
+        end
+
+        function G = getIrradianceProfile(this, step)
+            if step <= 100
+                G = 1000 * (step / 100);
+            elseif step <= 8000
+                G = 1000;
+            elseif step <= 13000
+                G = 600;
+            elseif step <= 18000
+                G = 600 + (step - 13000) * (400 / 5000);
+            else
+                G = 1000;
+            end
+        end
+
+        function actionSpace = getActionSpace(this)
+            actionSpace = this.ActionInfo.Elements;
+            if ~isvector(actionSpace) || length(actionSpace) ~= 3
+                warning('Invalid action space detected. Reinitializing to [-0.5, 0, 0.5].');
+                actionSpace = [-0.5, 0, 0.5];
+            end
+        end
+
+        function [voltages, powers] = getPVcurve(this, G)
+            voltages = linspace(0, this.Voc, 100);
+            powers = zeros(size(voltages));
+            for i = 1:length(voltages)
+                I = this.calculateCurrent(voltages(i), G);
+                powers(i) = voltages(i) * I;
+            end
+        end
+    end
+end
