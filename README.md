@@ -10,3 +10,6 @@ Hello again. This is my 2nd update for my DRL MPPT Project. I was spending time 
 For future updates to my DRL model, I am hoping to test the model using a randomly changing irradiance (not rapidly changing, one more in tune with the environment), and I think I should be able to finish that in a month or so. 
 
 Thank you for taking the time to learn about my project, and any recommendations are welcome.
+
+# 3rd Update
+I just added some code to show comparison graphs from the P&O model made on MATLAB, and added code to the P&O MATLAB code to output all data into a CSV file (which will be posted later). The graph for the PV curve still needs some work (something is wrong with how Python tries to take the data created in the CSV file from the MATLAB code for the P&O data).
